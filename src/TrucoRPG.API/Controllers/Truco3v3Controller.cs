@@ -1,0 +1,254 @@
+using Microsoft.AspNetCore.Mvc;
+using TrucoRPG.Dominio.Entities;
+using TrucoRPG.Dominio.Servicios;
+
+namespace TrucoRPG.API.Controllers
+{
+    // ── Request models ────────────────────────────────────────────
+    public record Truco3v3Request(Guid ManoId);
+    public record Truco3v3CartaRequest(Guid ManoId, int Numero, string Palo);
+    public record Truco3v3EnvidoRequest(Guid ManoId, string Tipo);
+    public record Truco3v3ResponderEnvidoRequest(Guid ManoId, bool Aceptar, string? EscalarA = null);
+    public record Truco3v3TantoRequest(Guid ManoId, int Tanto);
+    public record Truco3v3ResponderTrucoRequest(Guid ManoId, bool Aceptar, string? EscalarA = null);
+    public record Truco3v3NuevaPartidaRequest(int? NumeroDeMano = null, int? PuntosA = null, int? PuntosB = null);
+    public record Truco3v3ConsultaEnvidoRequest(Guid ManoId, bool Aceptar);
+    public record Truco3v3ConsultaTrucoRequest(Guid ManoId, bool Voy);
+    public record Truco3v3OrdenMayorRequest(Guid ManoId, string JugadorId);
+
+    public record Truco3v3PasoResponse(ManoTruco3v3 Mano, EventoMaquina3v3? Evento);
+
+    /// <summary>
+    /// Partida de Truco 3v3 contra la máquina (modo solo). Cada endpoint es una acción de
+    /// juego (cantar, responder, jugar carta, avanzar a la máquina, etc.) y devuelve el
+    /// estado actualizado de la mano.
+    /// </summary>
+    [ApiController]
+    [Route("api/[controller]")]
+    [Produces("application/json")]
+    public class Truco3v3Controller : ControllerBase
+    {
+        // ── IDs fijos de jugadores ─────────────────────────────────
+        // EquipoA = J1 (humano) + J3, J5 (compañeros bot)
+        // EquipoB = J2, J4, J6 (rivales bot)
+        private const string J1 = "J1";
+
+        // En el modo solo, el humano (J1) decide quiero/no quiero por todo su equipo.
+        private static readonly Func<ManoTruco3v3, string, string> Responsable =
+            TurnoServicio3v3.ObtenerResponsableParaJugador;
+
+        private static Jugador[] CrearJugadores() => new[]
+        {
+            new Jugador { Id = "J1", Nombre = "Vos",         EsMaquina = false },
+            new Jugador { Id = "J2", Nombre = "Rival 1",     EsMaquina = true  },
+            new Jugador { Id = "J3", Nombre = "Compañero 1", EsMaquina = true  },
+            new Jugador { Id = "J4", Nombre = "Rival 2",     EsMaquina = true  },
+            new Jugador { Id = "J5", Nombre = "Compañero 2", EsMaquina = true  },
+            new Jugador { Id = "J6", Nombre = "Rival 3",     EsMaquina = true  },
+        };
+
+        private static ManoTruco3v3 CrearMano(int num, int ptsA, int ptsB)
+        {
+            var j = CrearJugadores();
+            return PartidaServicio3v3.CrearManoNueva(num, ptsA, ptsB, j[0], j[1], j[2], j[3], j[4], j[5]);
+        }
+
+        private static ManoTruco3v3 CrearProximaMano(int num, int ptsA, int ptsB, int prevSlot)
+        {
+            var j = CrearJugadores();
+            return PartidaServicio3v3.CrearProximaMano(num, ptsA, ptsB, prevSlot, j[0], j[1], j[2], j[3], j[4], j[5]);
+        }
+
+        // ─────────────────────────────────────────────────────────
+        /// <summary>Crea una nueva partida 3v3 (vos + dos compañeros bot vs. tres rivales bot) y reparte la primera mano.</summary>
+        /// <param name="req">Opcional: número de mano y puntos iniciales de cada equipo.</param>
+        [HttpPost("nuevaPartida")]
+        public ActionResult<ManoTruco3v3> NuevaPartida([FromBody] Truco3v3NuevaPartidaRequest? req)
+        {
+            var mano = CrearMano(req?.NumeroDeMano ?? 1, req?.PuntosA ?? 0, req?.PuntosB ?? 0);
+            Truco3v3MemoriaServicio.Guardar(mano);
+            return Ok(mano);
+        }
+
+        /// <summary>El humano (J1) juega una carta (número y palo) sobre la mesa.</summary>
+        [HttpPost("jugarCarta")]
+        public ActionResult<ManoTruco3v3> JugarCarta([FromBody] Truco3v3CartaRequest req)
+        {
+            var mano = ObtenerMano(req.ManoId);
+            JuegoServicio3v3.ValidarAccionJugador(mano, J1);
+
+            if (!JuegoServicio3v3.JugarCartaPorValor(mano, J1, req.Numero, req.Palo))
+                throw new InvalidOperationException("Carta no encontrada en tu mano.");
+
+            Truco3v3MemoriaServicio.Actualizar(mano);
+            return Ok(mano);
+        }
+
+        /// <summary>El humano canta el envido (Envido, Real Envido, Falta Envido, etc.).</summary>
+        [HttpPost("cantarEnvido")]
+        public ActionResult<ManoTruco3v3> CantarEnvido([FromBody] Truco3v3EnvidoRequest req)
+        {
+            var mano = ObtenerMano(req.ManoId);
+            if (!EnvidoServicio3v3.Cantar(mano, J1, req.Tipo, Responsable))
+                throw new InvalidOperationException("No se puede cantar el envido ahora.");
+            Truco3v3MemoriaServicio.Actualizar(mano);
+            return Ok(mano);
+        }
+
+        /// <summary>Responde el envido por el equipo del humano (quiero / no quiero), con opción de escalar.</summary>
+        [HttpPost("responderEnvido")]
+        public ActionResult<ManoTruco3v3> ResponderEnvido([FromBody] Truco3v3ResponderEnvidoRequest req)
+        {
+            var mano = ObtenerMano(req.ManoId);
+            var escalar = req.EscalarA?.Trim();
+            bool ok = (req.Aceptar && !string.IsNullOrEmpty(escalar))
+                ? EnvidoServicio3v3.Escalar(mano, J1, escalar!, Responsable)
+                : EnvidoServicio3v3.Responder(mano, J1, req.Aceptar);
+            if (!ok)
+                throw new InvalidOperationException("No podés responder el envido ahora.");
+            Truco3v3MemoriaServicio.Actualizar(mano);
+            return Ok(mano);
+        }
+
+        /// <summary>Declara los tantos del humano durante la fase de declaración del envido.</summary>
+        [HttpPost("declararTanto")]
+        public ActionResult<ManoTruco3v3> DeclararTanto([FromBody] Truco3v3TantoRequest req)
+        {
+            var mano = ObtenerMano(req.ManoId);
+            // Validamos pre-condiciones explícitamente: ProcesarDeclaracion devuelve false tanto
+            // cuando falla la validación COMO cuando J1 declara OK pero todavía quedan rivales.
+            if (mano.FaseEnvido != "declarando_tantos" || mano.EnvidoPendienteRespuestaDe != J1)
+                throw new InvalidOperationException("No podés declarar el tanto ahora.");
+            EnvidoServicio3v3.ProcesarDeclaracion(mano, J1, req.Tanto, sonBuenas: false);
+            Truco3v3MemoriaServicio.Actualizar(mano);
+            return Ok(mano);
+        }
+
+        /// <summary>El humano dice "son buenas": reconoce que el rival tiene más tantos y no declara los suyos.</summary>
+        [HttpPost("sonBuenas")]
+        public ActionResult<ManoTruco3v3> SonBuenas([FromBody] Truco3v3Request req)
+        {
+            var mano = ObtenerMano(req.ManoId);
+            if (mano.FaseEnvido != "declarando_tantos" || mano.EnvidoPendienteRespuestaDe != J1)
+                throw new InvalidOperationException("No podés decir 'son buenas' ahora.");
+            EnvidoServicio3v3.ProcesarDeclaracion(mano, J1, null, sonBuenas: true);
+            Truco3v3MemoriaServicio.Actualizar(mano);
+            return Ok(mano);
+        }
+
+        /// <summary>El humano canta Truco.</summary>
+        [HttpPost("cantarTruco")]
+        public ActionResult<ManoTruco3v3> CantarTruco([FromBody] Truco3v3Request req)
+        {
+            var mano = ObtenerMano(req.ManoId);
+            if (!TrucoServicio3v3.Cantar(mano, J1, Responsable))
+                throw new InvalidOperationException("No se puede cantar el truco ahora.");
+            Truco3v3MemoriaServicio.Actualizar(mano);
+            return Ok(mano);
+        }
+
+        /// <summary>Sube la apuesta del truco (Retruco / Vale Cuatro) cuando tu equipo tiene la palabra.</summary>
+        [HttpPost("escalarTruco")]
+        public ActionResult<ManoTruco3v3> EscalarTruco([FromBody] Truco3v3Request req)
+        {
+            var mano = ObtenerMano(req.ManoId);
+            if (!TrucoServicio3v3.Escalar(mano, J1, Responsable))
+                throw new InvalidOperationException("No podés escalar el truco ahora.");
+            Truco3v3MemoriaServicio.Actualizar(mano);
+            return Ok(mano);
+        }
+
+        /// <summary>Responde el truco por el equipo del humano (quiero / no quiero), con opción de escalar.</summary>
+        [HttpPost("responderTruco")]
+        public ActionResult<ManoTruco3v3> ResponderTruco([FromBody] Truco3v3ResponderTrucoRequest req)
+        {
+            var mano = ObtenerMano(req.ManoId);
+            if (!TrucoServicio3v3.Responder(mano, J1, req.Aceptar, req.EscalarA, Responsable))
+                throw new InvalidOperationException("No podés responder el truco ahora.");
+            Truco3v3MemoriaServicio.Actualizar(mano);
+            return Ok(mano);
+        }
+
+        /// <summary>El humano se va al mazo y abandona la mano para su equipo.</summary>
+        [HttpPost("irseAlMazo")]
+        public ActionResult<ManoTruco3v3> IrseAlMazo([FromBody] Truco3v3Request req)
+        {
+            var mano = ObtenerMano(req.ManoId);
+            if (!TrucoServicio3v3.IrseAlMazo(mano, J1))
+                throw new InvalidOperationException("No podés irte al mazo ahora.");
+            Truco3v3MemoriaServicio.Actualizar(mano);
+            return Ok(mano);
+        }
+
+        /// <summary>Reparte una nueva mano dentro de la partida en curso (arrastra el puntaje). Falla si la mano actual no terminó o la partida ya terminó.</summary>
+        [HttpPost("nuevaMano")]
+        public ActionResult<ManoTruco3v3> NuevaMano([FromBody] Truco3v3Request req)
+        {
+            var anterior = ObtenerMano(req.ManoId);
+            if (anterior.GanadorMano == null && !anterior.PartidaTerminada)
+                throw new InvalidOperationException("La mano actual aún no terminó.");
+            if (anterior.PartidaTerminada)
+                throw new InvalidOperationException("La partida ya terminó. Iniciá una nueva partida.");
+
+            var nueva = CrearProximaMano(anterior.NumeroDeMano + 1, anterior.PuntosEquipoA, anterior.PuntosEquipoB, anterior.PicaPicaSlot);
+            Truco3v3MemoriaServicio.Guardar(nueva);
+            return Ok(nueva);
+        }
+
+        // ─────────────────────────────────────────────────────────
+        //  Compañero pregunta: ¿canto los tantos? / ¿voy o pongo?
+        // ─────────────────────────────────────────────────────────
+        /// <summary>Responde la consulta de un compañero bot sobre cantar el envido (acepta o no).</summary>
+        [HttpPost("responderConsultaEnvido")]
+        public ActionResult<ManoTruco3v3> ResponderConsultaEnvido([FromBody] Truco3v3ConsultaEnvidoRequest req)
+        {
+            var mano = ObtenerMano(req.ManoId);
+            MaquinaServicio3v3.ResolverConsultaEnvido(mano, req.Aceptar);
+            Truco3v3MemoriaServicio.Actualizar(mano);
+            return Ok(mano);
+        }
+
+        /// <summary>Responde la consulta de un compañero bot sobre el truco ("voy" carta baja / "pongo" carta alta).</summary>
+        [HttpPost("responderConsultaTruco")]
+        public ActionResult<ManoTruco3v3> ResponderConsultaTruco([FromBody] Truco3v3ConsultaTrucoRequest req)
+        {
+            var mano = ObtenerMano(req.ManoId);
+            MaquinaServicio3v3.ResolverConsultaTruco(mano, req.Voy);
+            Truco3v3MemoriaServicio.Actualizar(mano);
+            return Ok(mano);
+        }
+
+        // ─────────────────────────────────────────────────────────
+        //  Órdenes del humano a sus compañeros bot
+        // ─────────────────────────────────────────────────────────
+        /// <summary>El humano ordena a un compañero bot que juegue su carta más alta.</summary>
+        [HttpPost("ordenarMayor")]
+        public ActionResult<ManoTruco3v3> OrdenarMayor([FromBody] Truco3v3OrdenMayorRequest req)
+        {
+            var mano = ObtenerMano(req.ManoId);
+            // La regla (quién puede recibir la orden) vive en el dominio.
+            MaquinaServicio3v3.OrdenarJugarMayor(mano, req.JugadorId);
+            Truco3v3MemoriaServicio.Actualizar(mano);
+            return Ok(mano);
+        }
+
+        // ─────────────────────────────────────────────────────────
+        //  Avanzar UNA sola acción de máquina (delay/diálogos en el front)
+        // ─────────────────────────────────────────────────────────
+        /// <summary>Avanza UNA sola acción de máquina y devuelve la mano más el evento (para delays/diálogos en el front).</summary>
+        [HttpPost("avanzarMaquina")]
+        public ActionResult<Truco3v3PasoResponse> AvanzarMaquina([FromBody] Truco3v3Request req)
+        {
+            var mano = ObtenerMano(req.ManoId);
+            var evento = MaquinaServicio3v3.AvanzarUnPaso(mano);
+            Truco3v3MemoriaServicio.Actualizar(mano);
+            return Ok(new Truco3v3PasoResponse(mano, evento));
+        }
+
+        // ── Helpers ──
+        private static ManoTruco3v3 ObtenerMano(Guid id) =>
+            Truco3v3MemoriaServicio.Obtener(id)
+            ?? throw new KeyNotFoundException($"No se encontró la mano {id}.");
+
+    }
+}
