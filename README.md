@@ -1,4 +1,4 @@
-# ⚙️ Truco y Maña — Backend Showcase
+# 🃏 Truco y Maña — Backend Showcase
 
 > Muestra seleccionada de código y pruebas unitarias de mi autoría correspondientes al backend de **Truco y Maña** (ASP.NET Core API).
 
@@ -6,12 +6,12 @@
 
 ---
 
-## ℹ️ Alcance de este repositorio
+## Alcance de este repositorio
 Este repositorio reúne **únicamente una selección de archivos y carpetas** en los que trabajé dentro de `src/` y `tests/` con fines de portafolio y demostración de código. **No está pensado para compilarse como solución completa** ni contiene la totalidad del sistema del equipo, respetando la privacidad del repositorio grupal y omitiendo credenciales o configuraciones sensibles.
 
 ---
 
-## 🧠 Enfoque y Aportes en el Backend
+## 👩‍💻 Enfoque y Aportes en el Backend
 
 * **Arquitectura y organización inicial:** Definición y configuración inicial de la estructura de la solución en **ASP.NET Core API**, priorizando la separación de responsabilidades y una organización clara por capas.
 * **Identidad, autenticación y autorización:** Implementación de **ASP.NET Core Identity** y uso de **claims** de rol de jugador para centralizar la autorización en controladores y endpoints del juego.
