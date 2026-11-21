@@ -19,7 +19,7 @@ Este repositorio reúne **únicamente una selección de archivos y carpetas** en
 
 ---
 
-## 🗂️ Qué vas a encontrar en este repo
+## Qué vas a encontrar en este repo
 
 * `src/` — Controladores, servicios, configuración de identidad/autorización y módulos seleccionados donde participé.
 * `tests/` — Casos de prueba unitarios orientados a validar la lógica y componentes críticos con aislamiento mediante mocks.
